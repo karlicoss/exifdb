@@ -1,47 +1,62 @@
-My (somewhat opinionated) Python project template
+Still work in progress, just some vague notes and thoughts
 
-- minimal configuration in [[file:setup.py]], only setting the required fields
- 
-  No one cares about PyPi keywords, descriptions etc.
-- uses pytest and mypy (+coverage) for checks
-- relies on [[file:tox.ini][tox]] for running tests and checks in isolation
-- uses Github Actions for CI
 
-  - make sure you can run CI against pull requests from other people (=pull_request= trigger)
-    Note that people who fork it need to go to "Actions" tab on their fork and click "I understand my workflows, go ahead and enable them".
-  - build matrix for multiple python versions
-  - trying to keep as little as possible in the CI configuration
-   
-    Because [[https://beepb00p.xyz/configs-suck.html][fuck]] yaml configs and learning yet another templating syntax
-- automatic PyPi deployments on new tags
+* Problem
+Photo/video ("media") management software is a bit of a mess.
 
-* CI
-- see [[file:.github/workflows/main.yml][the config]]
-- running CI locally: use [[https://github.com/nektos/act][=act=]] (e.g. try with =act -l=)
+For example, in Digikam, depending on settings, certain metadata is written into Digikam's database, and other metadata ends up in photo/video EXIF (and other types of metadata).
+The process isn't very transparent, and it's possible that your photos end up with metadata you don't want there, or vice versa, the software erases or mangles tags you don't expect to be touched.
 
-* PyPi releases
+Media galleries are a mess as well.
 
-#+begin_src python :results output drawer :exports results
-import imp
-m = imp.load_source('release', '.ci/release')
-print(m.__doc__)
-#+end_src
+Depending on the gallery software, different tags are supported, even for basic properties like media creation time.
+So something that works in one gallery may not work in another, which locks you in and makes it harder to switch (or even evaluate different software).
 
-#+RESULTS:
-:results:
+* Solution (?)
+This tool aims to do few things:
 
-Run [[file:scripts/release][scripts/release]] to deploy Python package onto [[https://pypi.org][PyPi]] and [[https://test.pypi.org][test PyPi]].
+- keep track of media metadata in an sqlite database.
 
-The script expects =TWINE_PASSWORD= environment variable to contain the [[https://pypi.org/help/#apitoken][PyPi token]] (not the password!).
+  From time to time you 'import' new metadata into the database and in case there were any changes you are presented with a diff. This gives you a chance to restore photos from a backup if you see any unexpeted changes.
 
-The script can be run manually.
-It's also running as =pypi= job in [[file:.github/workflows/main.yml][Github Actions config]]. Packages are deployed on:
-- every master commit, onto test pypi
-- every new tag, onto production pypi
+- check that media has reasonable metadata
 
-You'll need to set =TWINE_PASSWORD= and =TWINE_PASSWORD_TEST= in [[https://help.github.com/en/actions/configuring-and-managing-workflows/creating-and-storing-encrypted-secrets#creating-encrypted-secrets][secrets]]
-for Github Actions deployment to work.
+  - proper creation date
+  - timezone information (since usually datetime stored in photo is local time)
+  - GPS coordinates
 
-:end:
+  It doesn't feel as much to ask, does it?
+  Yet, it can be surprisingly tedious to ensure, especially if your photos were collected over years from different cameras/phones; send to you by friends by social media, etc.
 
-# TODO maybe generate github actions config and have a literal readme?
+- in case some metadata above is missing, the tool tries its best to offer you an automatic fix via =exiftool=
+
+  The metadata database mentioned above gives you additional reassurance that the tool won't mess up your media files.
+
+
+* Typical issues with metadata
+
+Here's an incomplete list of issues I noticed on my media files that the tool detects or aims to fix
+
+- some photos had =24= as an "hour" field in the creation date
+
+- sometimes =GPSDateTime= included =Z= at the end of timestamp, which will be a parsing error in most software
+
+- some photos only have =ModifyDate= instead of =CreateDate= or =CreationDate=
+
+  in this case the tool suggests you to fill =CreationDate= from other tags or infer from the filename
+
+- some photos don't have any proper datetime tags at all
+
+  in this case the tool tries to extract it from the filename or =GPSDateTime=
+
+- media shared via social media has creation date tags zeroed out (i.e. =0000-00-00 00:00:00=) and has no coordinates
+
+- most cameras/phones don't set =OffsetTimeOriginal= (timezone information)
+
+  in this case the tool tries to infer it from creation (local) time and GPS coordinates
+
+- Digikam version 7 (Ubuntu 22.04) sometimes was stripping =GPSDatetime= from photos while editing unrelated metadata
+
+  TODO need to file a bug
+
+- Digikam version 8 with =exiftool= backend sometimes erases XMP tags [[https://bugs.kde.org/show_bug.cgi?id=473826]]
