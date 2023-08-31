@@ -183,7 +183,7 @@ def check_media(row: Row) -> Iterator[
                 # never happened but just in case
                 yield f'bad gps coordinates, likely missing ref {exif}'
         elif all(c is None for c in coords.values()):
-            yield 'missing GPSPosition'
+            yield 'GPSPosition missing'
         else:
             # just in case, but didn't happen for me
             yield f'bad gps coordinate tags {exif}'
@@ -209,7 +209,7 @@ def check_media(row: Row) -> Iterator[
         if gps_dt_s is None:
             # todo not sure if should be error tbh, tons of photos don't have it...
             # maybe a warning?
-            yield 'missing GPSDateTime'
+            yield 'GPSDateTime missing'
             return None
 
         try:
@@ -285,7 +285,7 @@ def check_media(row: Row) -> Iterator[
             # or rely on reconciliation of inferring datetime from filename to double check
 
             # also, seems that mp4 always has it, but sometimes it's zeroed out (e.g. whatsapp videos)
-            dt_orig_s = row.get(Tags.CreateDate)
+            dt_orig_tag = Tags.CreateDate
         elif mime == 'video/quicktime':
             # TODO these actually have CreationDate that has timezone?
             # but unclear -- seems it's derived from this header and basically free form?
@@ -295,16 +295,18 @@ def check_media(row: Row) -> Iterator[
             # TAG:com.apple.quicktime.creationdate=2022-08-18T10:03:44+0100
             # 1. need to prefer that and maybe set timezone after extraction
             # 2. wonder if possible to retrofit that for video/mp4 files?
-            dt_orig_s = row.get(Tags.CreateDate)
+            dt_orig_tag = Tags.CreateDate
         else:
             # this works for jpg
             # works for heic (iphone photos?)
             # seems to work for avi as well -- it uses some sort of RIFF metadata which maps into DateTimeOriginal
-            dt_orig_s = row.get(Tags.DateTimeOriginal)
+            dt_orig_tag = Tags.DateTimeOriginal
             # note: some software (e.g. digikam does a bunch of fallbacks)
             # e.g. DateTimeOriginal, then CreateDate, then ModifyDate
             # imo it's better to be a bit more specific and fix up metadata to have canonical tags
             # that way photos would be more compatible with software that only uses most common tags
+
+        dt_orig_s = row.get(dt_orig_tag)
 
         if dt_orig_s is None:
             # ok, it's up to the downstream user to interpret this and suggest to fix?
@@ -318,8 +320,7 @@ def check_media(row: Row) -> Iterator[
         try:
             res = datetime.strptime(dt_orig_s, '%Y:%m:%d %H:%M:%S')
         except Exception as e:
-            # todo add tag name?
-            yield f"couldn't parse {dt_orig_s}"
+            yield f"creation datetime: couldn't parse {dt_orig_s} from {dt_orig_tag}"
             return None
 
         # just in case
@@ -344,9 +345,9 @@ def check_media(row: Row) -> Iterator[
         }
         notnone = {k: v for k, v in dt_tags.items() if v is not None}
         # OK, so maybe to start with -- just print stuff above as a suggestion
-        xxerr = f'missing created datetime'
+        prefix = 'creation datetime missing'
         if len(notnone) > 0:
-            xxerr += f', also found some datetime-like tags {notnone}'
+            prefix += f': found some datetime-like tags {notnone}'
         if filename_datetime_res is not None:
             filename_datetime, filename_datetime_has_subsec = filename_datetime_res
             # TODO only offer fix if mime is jpeg?
@@ -368,7 +369,7 @@ def check_media(row: Row) -> Iterator[
                     exiftool_set_tag(path=path, tag=tag, value=dts, comment=f'inferred {tag} from the filename {filename}')
                     # todo might be nice to combine with tz settings, but a bit tricky
 
-            yield (xxerr + f'. Has filename timestamp {filename_datetime}, use --fix to set it', _Fix())
+            yield (prefix + f': has filename timestamp {filename_datetime}, use --fix to set it', _Fix())
             # ok, if we have coordinates, then we can figure out local time from that
             # and also offset..
             # TODO hmm actually not sure about it
@@ -380,7 +381,7 @@ def check_media(row: Row) -> Iterator[
             # can still use gps as a sanity check? e.g. emit warning if photo is more than 30 min away..
             #
         else:
-            yield xxerr
+            yield prefix
 
 
     # let's see if we can figure out the timezone
@@ -401,7 +402,7 @@ def check_media(row: Row) -> Iterator[
 
         notnone = {k: v for k, v in tz_tags.items() if v is not None}
 
-        prefix = f'missing {Tags.OffsetTimeOriginal}: '
+        prefix = f'{Tags.OffsetTimeOriginal} missing: '
 
         if len(notnone) > 0:
             tz_err = prefix + f'maybe you can figure it out from {notnone}'
@@ -443,17 +444,19 @@ def check_media(row: Row) -> Iterator[
         class FixOffsetFromGPS(Fix):
             @property
             def description(self) -> str:
-                return f'Set {target} to {self.offset_s}?'
+                (tzname, offset_s) = self.tz
+                return f'Set {target} to {offset_s} ({tzname})?'
 
             def fix(self) -> None:
+                (tzname, offset_s) = self.tz
                 # NOTE: when we do that, exiftool also computes SubSecDateTimeOriginal
                 # which has both datetime and tz offset
                 # see https://github.com/photoprism/photoprism/issues/2320
                 # perhaps later should ensure we have all necessary DateTimeOriginal tags?
-                exiftool_set_tag(path=path, tag=target, value=self.offset_s, comment=f'inferred {target} from GPS')
+                exiftool_set_tag(path=path, tag=target, value=offset_s, comment=f'inferred {target} from GPS ({tzname})')
 
             @cached_property  # cached because computing timezone from coordinates is expensive
-            def offset_s(self) -> str:
+            def tz(self) -> tuple[str, str]:  # tz name, offset
                 # need to convince mypy again
                 assert coordinate is not None
                 assert dt_orig_res is not None
@@ -477,7 +480,7 @@ def check_media(row: Row) -> Iterator[
                 sign = '+' if tots >= 0 else '-'
                 hh, mm = divmod(abs(tots), 3600)
                 offset_s = f'{sign}{hh:02d}:{mm:02d}'
-                return offset_s
+                return (tzname, offset_s)
 
         yield prefix + f'has GPS coordinates and local datetime {dt_orig_res}. Use --fix to set the offset', FixOffsetFromGPS()
         return None

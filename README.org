@@ -60,6 +60,10 @@ Here's an incomplete list of issues I noticed on my media files that the tool de
 
   in this case the tool tries to infer it from creation (local) time and GPS coordinates
 
+- different media types rely on different tags for creation time
+
+  E.g. jpg uses =DateTimeOriginal= whereas mp4 uses =CreateDate=
+
 - Digikam version 7 (Ubuntu 22.04) sometimes was stripping =GPSDatetime= from photos while editing unrelated metadata
 
   TODO need to file a bug
