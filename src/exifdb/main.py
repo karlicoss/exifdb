@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sqlite3
 import sys
-from typing import Iterator, Generator, Callable
+from typing import Iterator, Generator, Callable, Protocol, Final
 
 import click
 import geopy  # type: ignore
@@ -121,10 +121,11 @@ Error = str
 _SEEN = set(TAGS_WITH_COLON)
 
 
-@dataclass
-class Fix:
-    description: str
-    fix: Callable[[], None]
+class Fix(Protocol):
+    @property
+    def description(self) -> str: ...
+
+    def fix(self) -> None: ...
 
 
 def check_media(row: Row) -> Iterator[
@@ -190,13 +191,18 @@ def check_media(row: Row) -> Iterator[
 
     # hmm not sure about Generator usage here.. but I guess ok to experiment
     # https://peps.python.org/pep-0380/
-    coordinate = yield from check_coordinate()
+    coordinate: Final[Coordinate | None] = yield from check_coordinate()
 
     def check_gps_datetime() -> Generator[
             Error,
             None,
             datetime_aware | None,
     ]:
+        if mime in {'video/mp4', 'video/quicktime', 'video/x-msvideo'}:
+            # seems like quicktime doesn't support gps datetime
+            # https://exiftool.org/TagNames/QuickTime.html
+            return None
+
         gps_dt_s = row.get(Tags.GPSDateTime)
         if gps_dt_s is None:
             # todo not sure if should be error tbh, tons of photos don't have it...
@@ -214,13 +220,7 @@ def check_media(row: Row) -> Iterator[
         gps_dt = gps_dt.replace(tzinfo=timezone.utc)
         return gps_dt
 
-    # seems like quicktime doesn't support gps datetime
-    # https://exiftool.org/TagNames/QuickTime.html
-    supports_gps_datetime = mime not in {'video/mp4', 'video/quicktime', 'video/x-msvideo'}
-    if supports_gps_datetime:
-        gps_datetime = yield from check_gps_datetime()
-    else:
-        gps_datetime = None
+    gps_datetime: Final[datetime_aware | None] = yield from check_gps_datetime()
 
     def check_filename_datetime() -> Generator[
             Error,
@@ -323,7 +323,7 @@ def check_media(row: Row) -> Iterator[
 
         return res
 
-    dt_orig_res: datetime_naive | None = yield from check_original_datetime()
+    dt_orig_res: Final[datetime_naive | None] = yield from check_original_datetime()
 
     # ok, so apparently generally photo software isn't relying on GPS tags to infer datetime
     # so should try some other tags first?
@@ -333,8 +333,8 @@ def check_media(row: Row) -> Iterator[
     if dt_orig_res is None:
         # ok, let's see if anything else we could do
         dt_tags: dict[str, str | None] = {
-            **{tag: row.get(tag) for tag in DT_TAGS},
-            **{tag: exif.get(tag) for tag in DT_EXTRA},
+            **{t: row.get(t) for t in DT_TAGS},
+            **{t: exif.get(t) for t in DT_EXTRA},
         }
         notnone = {k: v for k, v in dt_tags.items() if v is not None}
         # OK, so maybe to start with -- just print stuff above as a suggestion
@@ -350,33 +350,29 @@ def check_media(row: Row) -> Iterator[
                 tag = Tags.SubSecDateTimeOriginal
             else:
                 tag = Tags.DateTimeOriginal
-            def fix_datetimeoriginal() -> None:
-                assert mime == 'image/jpeg', path  # TODO later support more
-                # otherwise can end up in an inconsistent state?
-                dts = filename_datetime.strftime(dtfmt)
 
-                exiftool_set_tag(path=path, tag=tag, value=dts, comment=f'inferred {tag} from the filename {filename}')
-                # TODO so could combine with tz setting..
-                # need to immediately return after the modification
-                # TODO maybe throw in exiftool_set_tag for extra safety? and catch on the top level
-                # otherwise easy to miss return after set_tag call
-            fixer = Fix(
-                description=f'Set {tag} from the filename? {filename}. Timestamp will be {filename_datetime}',
-                fix=fix_datetimeoriginal,
-            )
-            # ugh mypy is confused here for some reason??
-            yield (xxerr + f'. Has filename timestamp {filename_datetime}, use --fix to set it', fixer)
+            class _Fix(Fix):
+                description = f'Set {tag} from the filename? {filename}. Timestamp will be {filename_datetime}'
 
-                # ok, if we have coordinates, then we can figure out local time from that
-                # and also offset..
-                # TODO hmm actually not sure about it
-                # seems like GPS generally lags behind datetimeoriginal, sometimes by minutes
-                # (perhaps if the phone was out of GPS reach or something...)
-                # so perhaps better options is to parse from filename? it's supposed to be local time anyway...
-                # it still generally mismatches by a few seconds but perhaps better than nothing..
-                #
-                # can still use gps as a sanity check? e.g. emit warning if photo is more than 30 min away..
-                #
+                def fix(self) -> None:
+                    assert mime == 'image/jpeg', path  # TODO later support more
+                    # otherwise can end up in an inconsistent state?
+                    dts = filename_datetime.strftime(dtfmt)
+
+                    exiftool_set_tag(path=path, tag=tag, value=dts, comment=f'inferred {tag} from the filename {filename}')
+                    # todo might be nice to combine with tz settings, but a bit tricky
+
+            yield (xxerr + f'. Has filename timestamp {filename_datetime}, use --fix to set it', _Fix())
+            # ok, if we have coordinates, then we can figure out local time from that
+            # and also offset..
+            # TODO hmm actually not sure about it
+            # seems like GPS generally lags behind datetimeoriginal, sometimes by minutes
+            # (perhaps if the phone was out of GPS reach or something...)
+            # so perhaps better options is to parse from filename? it's supposed to be local time anyway...
+            # it still generally mismatches by a few seconds but perhaps better than nothing..
+            #
+            # can still use gps as a sanity check? e.g. emit warning if photo is more than 30 min away..
+            #
         else:
             yield xxerr
 
@@ -405,20 +401,21 @@ def check_media(row: Row) -> Iterator[
             tz_err = prefix + f'maybe you can figure it out from {notnone}'
             if Tags.OffsetTime in notnone:
                 ot_value = notnone[Tags.OffsetTime]
-                def fix_set_offsettimeoriginal() -> None:
-                    assert mime == 'image/jpeg', path  # just in case
 
-                    exiftool_set_tag(
-                        path=path,
-                        tag=Tags.OffsetTimeOriginal,
-                        value=ot_value,
-                        comment=f'inferred {Tags.OffsetTimeOriginal} from {Tags.OffsetTime}',
-                    )
-                fixer = Fix(
-                    description=f'Set {Tags.OffsetTimeOriginal} from {Tags.OffsetTime}?',
-                    fix=fix_set_offsettimeoriginal,
-                )
-                yield tz_err + f', use --fix to set it from {Tags.OffsetTime}', fixer
+                class FixOffsetFromOtherTag(Fix):
+                    description = f'Set {Tags.OffsetTimeOriginal} from {Tags.OffsetTime}?'
+
+                    def fix(self) -> None:
+                        assert mime == 'image/jpeg', path  # just in case
+
+                        exiftool_set_tag(
+                            path=path,
+                            tag=Tags.OffsetTimeOriginal,
+                            value=ot_value,
+                            comment=f'inferred {Tags.OffsetTimeOriginal} from {Tags.OffsetTime}',
+                        )
+
+                yield tz_err + f', use --fix to set it from {Tags.OffsetTime}', FixOffsetFromOtherTag()
             else:
                 yield tz_err  # TODO this is more of a fallback error? return as the last resort?
 
@@ -435,36 +432,48 @@ def check_media(row: Row) -> Iterator[
 
         # ok, we have a coordinate and local time, so possible to infer and set the timezone
 
-        # TODO if we wanna ignore error, kinda a shame to compute this at all..
-        # so maybe fixer should be able to generate its own description...
-        (lat_s, lon_s) = coordinate
-        point = geopy.Point.from_string(
-            (lat_s + ' ' + lon_s).replace('deg', '').replace('"', "''").replace(",", '')
-        )
-        # NOTE ok, using fast=False can slow things down significantly..
-        # but it seems that I do have a bit of difference in a few cases...
-        tzfinder = timezone_finder(fast=False)
-        tzname = tzfinder.timezone_at(lat=point.latitude, lng=point.longitude)
-        assert tzname is not None, point
-        tz = pytz.timezone(tzname)
+        target = Tags.OffsetTimeOriginal
 
-        offset = tz.localize(dt_orig_res).utcoffset()
-        assert offset is not None
-        tots = int(offset.total_seconds())
-        sign = '+' if tots >= 0 else '-'
-        hh, mm = divmod(abs(tots), 3600)
-        offset_s = f'{sign}{hh:02d}:{mm:02d}'
+        class FixOffsetFromGPS(Fix):
+            @property
+            def description(self) -> str:
+                return f'Set {target} to {self.offset_s}?'
 
-        tag = Tags.OffsetTimeOriginal
-        fff = Fix(
-            description=f'Set {tag} to {offset_s}?',
-            # NOTE: when we do that, exiftool also sets SubSecDateTimeOriginal
-            # which has both datetime and tz offset
-            # see https://github.com/photoprism/photoprism/issues/2320
-            # perhaps later should ensure we have all necessary DateTimeOriginal tags?
-            fix=lambda: exiftool_set_tag(path=path, tag=tag, value=offset_s, comment=f'inferred {tag} from GPS'),
-        )
-        yield prefix + f'has GPS coordinates {tzname} and local datetime {dt_orig_res}. Judging by them, {tag} should be {offset_s}', fff
+            def fix(self) -> None:
+                # NOTE: when we do that, exiftool also computes SubSecDateTimeOriginal
+                # which has both datetime and tz offset
+                # see https://github.com/photoprism/photoprism/issues/2320
+                # perhaps later should ensure we have all necessary DateTimeOriginal tags?
+                exiftool_set_tag(path=path, tag=target, value=self.offset_s, comment=f'inferred {target} from GPS')
+
+            @cached_property  # cached because computing timezone from coordinates is expensive
+            def offset_s(self) -> str:
+                # need to convince mypy again
+                assert coordinate is not None
+                assert dt_orig_res is not None
+                # https://github.com/python/mypy/issues/2608#issuecomment-1689653609
+
+
+                (lat_s, lon_s) = coordinate
+                point = geopy.Point.from_string(
+                    (lat_s + ' ' + lon_s).replace('deg', '').replace('"', "''").replace(",", '')
+                )
+                # NOTE ok, using fast=False can slow things down significantly..
+                # but it seems that I do have a bit of difference in a few cases...
+                tzfinder = timezone_finder(fast=False)
+                tzname = tzfinder.timezone_at(lat=point.latitude, lng=point.longitude)
+                assert tzname is not None, point
+                tz = pytz.timezone(tzname)
+
+                offset = tz.localize(dt_orig_res).utcoffset()
+                assert offset is not None
+                tots = int(offset.total_seconds())
+                sign = '+' if tots >= 0 else '-'
+                hh, mm = divmod(abs(tots), 3600)
+                offset_s = f'{sign}{hh:02d}:{mm:02d}'
+                return offset_s
+
+        yield prefix + f'has GPS coordinates and local datetime {dt_orig_res}. Use --fix to set the offset', FixOffsetFromGPS()
         return None
 
 
