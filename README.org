@@ -12,6 +12,9 @@ Media galleries are a mess as well.
 Depending on the gallery software, different tags are supported, even for basic properties like media creation time.
 So something that works in one gallery may not work in another, which locks you in and makes it harder to switch (or even evaluate different software).
 
+Some galleries like Google Photos don't support updating photo metadata once you've uploaded them.
+So you really want to get the metadata right before uploading, unless you're a fan of manually deleting and reuploading again.
+
 * Solution (?)
 This tool aims to do few things:
 

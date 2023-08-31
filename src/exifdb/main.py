@@ -498,23 +498,34 @@ def check_media(row: Row) -> Iterator[
 def check_all_media(*, db_path: str, regex: str | None, apply_fixes: bool, dir_summary: bool, config: Config) -> None:
     db = Db(db_path=db_path)
 
+    total = 0
+    excluded_config = 0
+    excluded_regex = 0
+    missing = 0
+    checked = 0
     errs_per_directory: dict[Path, int] = {}
 
     fixers = []
     # todo report progress?
     for row in db.query():
         path = row.path
+        total += 1
 
         if not config.include_filename(path=path):
+            excluded_config += 1
             continue
 
         if regex is not None and not re.search(regex, path):
+            excluded_regex += 1
             continue
 
         pp = Path(path)
         if not pp.exists():
+            missing += 1
             logger.debug(f"{pp} doesn't exist anymore.. ignoring")
             continue
+
+        checked += 1
 
         xrow = Row(row=row)
 
@@ -549,6 +560,9 @@ def check_all_media(*, db_path: str, regex: str | None, apply_fixes: bool, dir_s
         if row_fixer is not None:
             err, fixer = row_fixer
             fixers.append((path, err, fixer))
+
+    # todo highlight chekced with bold?
+    logger.info(f'Stats: {total=:<5d} {checked=:<5d} {excluded_config=:<5d} {excluded_regex=:<5d} {missing=:<5d}')
 
     if dir_summary:
         logger.info('summary of errors per directory')
