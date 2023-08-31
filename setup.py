@@ -28,6 +28,15 @@ def main() -> None:
         ## ^^^ this should be mostly automatic and not requiring any changes
 
         install_requires=[
+            'loguru',  # logging
+            'click',  # CLI
+            'pytz',
+            'sqlalchemy',
+            'orjson',  # faster json processing
+
+            'timezonefinder',  # guessing timezone by coordionate
+            'geopy',  # coordinate parsing
+
             # vvv example of git repo dependency
             # 'repo @ git+https://github.com/karlicoss/repo.git',
 
