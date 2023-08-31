@@ -74,7 +74,7 @@ class Row:
     def exif(self) -> dict[str, str]:
         return orjson.loads(self.row.exif)
 
-    def get(self, tag: str) -> str:
+    def get(self, tag: str) -> str | None:
         return getattr(self.row, tag)
 
 
@@ -129,7 +129,7 @@ class Fix:
 
 def check_media(row: Row) -> Iterator[
         # in simple cases just return the error, otherwise attach a fix
-        Error | tuple[Error | Fix],
+        Error | tuple[Error, Fix],
 ]:
     path = row.path
     ppath = Path(path)
@@ -151,7 +151,7 @@ def check_media(row: Row) -> Iterator[
     # although gonna be tricky and we might want to enrich such pics as well
 
     # todo not sure if really belongs here?
-    def detect_datetimeish_tags():
+    def detect_datetimeish_tags() -> None:
         '''
         try to extract anything that looks like timestamps
         '''
@@ -173,8 +173,8 @@ def check_media(row: Row) -> Iterator[
     ]:
         coords = {tag: row.get(tag) for tag in GPS_TAGS}
         if all(c is not None for c in coords.values()):
-            lat_s = row.get(Tags.GPSLatitude)
-            lon_s = row.get(Tags.GPSLongitude)
+            lat_s = row.get(Tags.GPSLatitude); assert lat_s is not None
+            lon_s = row.get(Tags.GPSLongitude); assert lon_s is not None
             gps_re = r'\d+.*(N|S|W|E)'
             if re.fullmatch(gps_re, lat_s) and re.fullmatch(gps_re, lon_s):
                 return (lat_s, lon_s)
@@ -254,15 +254,6 @@ def check_media(row: Row) -> Iterator[
 
     filename_datetime_res = yield from check_filename_datetime()
 
-
-    def get_dt_orig() -> datetime | None:  # meh
-        assert mime == 'image/jpeg', (path, mime)  # just in case..
-        s = row.get(Tags.DateTimeOriginal)
-        if s is None:
-            return None
-        return datetime.strptime(s, '%Y:%m:%d %H:%M:%S')
-
-
     def check_original_datetime() -> Generator[
             Error,
             None,
@@ -332,14 +323,14 @@ def check_media(row: Row) -> Iterator[
 
         return res
 
-
-    dt_orig = yield from check_original_datetime()
+    dt_orig_res: datetime_naive | None = yield from check_original_datetime()
 
     # ok, so apparently generally photo software isn't relying on GPS tags to infer datetime
     # so should try some other tags first?
 
     # TODO a couple of photos have MetadataDate but nothing else
-    if dt_orig is None:
+    # TODO this should be moved inside check_original_datetime?
+    if dt_orig_res is None:
         # ok, let's see if anything else we could do
         dt_tags: dict[str, str | None] = {
             **{tag: row.get(tag) for tag in DT_TAGS},
@@ -374,7 +365,7 @@ def check_media(row: Row) -> Iterator[
                 fix=fix_datetimeoriginal,
             )
             # ugh mypy is confused here for some reason??
-            yield (xxerr + f'. Has filename timestamp {filename_datetime}, use --fix to set it', fixer)  # type: ignore[misc]
+            yield (xxerr + f'. Has filename timestamp {filename_datetime}, use --fix to set it', fixer)
 
                 # ok, if we have coordinates, then we can figure out local time from that
                 # and also offset..
@@ -391,19 +382,29 @@ def check_media(row: Row) -> Iterator[
 
 
     # let's see if we can figure out the timezone
+    def check_tz_offset() -> Generator[
+            Error | tuple[Error, Fix],
+            None,
+            str | None,
+    ]:
+        dt_offset_s = row.get(Tags.OffsetTimeOriginal)
+        if dt_offset_s is not None:
+            # TODO check first that it's valid?
+            return dt_offset_s
 
-    dt_offset_s = row.get(Tags.OffsetTimeOriginal)
-    if dt_offset_s is None:
         tz_tags = {
             **{tag: row.get(tag) for tag in TZ_TAGS},
             **{tag: exif.get(tag) for tag in TZ_EXTRA},
         }
-        if any(v is not None for v in tz_tags.values()):
-            notnone = {k: v for k, v in tz_tags.items() if v is not None}
-            tz_err = f'missing tz, but maybe you can figure it out from {notnone}'
-            ot_tag = 'OffsetTime'  # TODO move to Tags?
-            if ot_tag in notnone:
-                ot_value = notnone[ot_tag]
+
+        notnone = {k: v for k, v in tz_tags.items() if v is not None}
+
+        prefix = f'missing {Tags.OffsetTimeOriginal}: '
+
+        if len(notnone) > 0:
+            tz_err = prefix + f'maybe you can figure it out from {notnone}'
+            if Tags.OffsetTime in notnone:
+                ot_value = notnone[Tags.OffsetTime]
                 def fix_set_offsettimeoriginal() -> None:
                     assert mime == 'image/jpeg', path  # just in case
 
@@ -411,59 +412,72 @@ def check_media(row: Row) -> Iterator[
                         path=path,
                         tag=Tags.OffsetTimeOriginal,
                         value=ot_value,
-                        comment=f'inferred {Tags.OffsetTimeOriginal} from {ot_tag}',
+                        comment=f'inferred {Tags.OffsetTimeOriginal} from {Tags.OffsetTime}',
                     )
                 fixer = Fix(
-                    description=f'Set {Tags.OffsetTimeOriginal} from {ot_tag}?',
+                    description=f'Set {Tags.OffsetTimeOriginal} from {Tags.OffsetTime}?',
                     fix=fix_set_offsettimeoriginal,
                 )
-                yield tz_err + f', use --fix to set it from {ot_tag}', fixer
+                yield tz_err + f', use --fix to set it from {Tags.OffsetTime}', fixer
             else:
-                yield tz_err
+                yield tz_err  # TODO this is more of a fallback error? return as the last resort?
 
-        # TODO move this comment..
-        # ok, so even after this 2/3 of my photos don't have it
-        # so will have to rely on coordinates for tz
-        # if we don't have coordinates, we can't figure out timezone from UTC
-        if gps_datetime is not None and coordinate is not None:
-            # ok, this might be possible to fix automatically
-            dto = get_dt_orig()
-            if dto is None:
-                # not much we can do, doesn't make sense to set OffsetTimeOriginal without DateTimeOriginal
-                yield f'missing tz tags, but has GPS datetime {gps_datetime}. No DateTimeOriginal though'
-            else:
-                # TODO if we wanna ignore error, kinda a shame to compute this at all..
-                # so maybe fixer should be able to generate its own description...
-                (lat_s, lon_s) = coordinate
-                point = geopy.Point.from_string(
-                    (lat_s + ' ' + lon_s).replace('deg', '').replace('"', "''").replace(",", '')
-                )
-                # NOTE ok, using fast=False can slow things down significantly..
-                # but it seems that I do have a bit of difference in a few cases...
-                tzfinder = timezone_finder(fast=False)
-                tzname = tzfinder.timezone_at(lat=point.latitude, lng=point.longitude)
-                assert tzname is not None, point
-                tz = pytz.timezone(tzname)
-                offset = tz.localize(dto).utcoffset()
-                assert offset is not None
-                tots = int(offset.total_seconds())
-                sign = '+' if tots >= 0 else '-'
-                hh, mm = divmod(abs(tots), 3600)
-                offset_s = f'{sign}{hh:02d}:{mm:02d}'
-                tag = Tags.OffsetTimeOriginal
-                fff = Fix(
-                    description=f'Set {tag} to {offset_s}?',
-                    # NOTE: when we do that, exiftool also sets SubSecDateTimeOriginal
-                    # which has both datetime and tz offset
-                    # see https://github.com/photoprism/photoprism/issues/2320
-                    # perhaps later should ensure we have all necessary DateTimeOriginal tags?
-                    fix=lambda: exiftool_set_tag(path=path, tag=tag, value=offset_s, comment=f'inferred {tag} from GPS'),
-                )
-                yield f'missing tz tags, but has GPS datetime {gps_datetime}. Judging by GPS coordinates, OffsetTimeOriginal should be {offset_s}', fff
-        else:
-            # at this point 3K photos still missing tz.. oof
-            # TODO move to the top, right after we parse the coordinate?
-            yield f'missing tz gps coordinate: {coordinate is not None} gps timestamp {gps_datetime}'
+        if coordinate is None:
+            yield prefix + "no GPS coordinates, so can't infer out the offset"
+            return None
+
+        if dt_orig_res is None:
+            # NOTE: even if we have GPSDateTime here,
+            # there isn't much we can do
+            # doesn't make sense to set OffsetTimeOriginal without DateTimeOriginal
+            yield prefix + "has GPS coordinates, but no local time, so can't infer the offset"
+            return None
+
+        # ok, we have a coordinate and local time, so possible to infer and set the timezone
+
+        # TODO if we wanna ignore error, kinda a shame to compute this at all..
+        # so maybe fixer should be able to generate its own description...
+        (lat_s, lon_s) = coordinate
+        point = geopy.Point.from_string(
+            (lat_s + ' ' + lon_s).replace('deg', '').replace('"', "''").replace(",", '')
+        )
+        # NOTE ok, using fast=False can slow things down significantly..
+        # but it seems that I do have a bit of difference in a few cases...
+        tzfinder = timezone_finder(fast=False)
+        tzname = tzfinder.timezone_at(lat=point.latitude, lng=point.longitude)
+        assert tzname is not None, point
+        tz = pytz.timezone(tzname)
+
+        offset = tz.localize(dt_orig_res).utcoffset()
+        assert offset is not None
+        tots = int(offset.total_seconds())
+        sign = '+' if tots >= 0 else '-'
+        hh, mm = divmod(abs(tots), 3600)
+        offset_s = f'{sign}{hh:02d}:{mm:02d}'
+
+        tag = Tags.OffsetTimeOriginal
+        fff = Fix(
+            description=f'Set {tag} to {offset_s}?',
+            # NOTE: when we do that, exiftool also sets SubSecDateTimeOriginal
+            # which has both datetime and tz offset
+            # see https://github.com/photoprism/photoprism/issues/2320
+            # perhaps later should ensure we have all necessary DateTimeOriginal tags?
+            fix=lambda: exiftool_set_tag(path=path, tag=tag, value=offset_s, comment=f'inferred {tag} from GPS'),
+        )
+        yield prefix + f'has GPS coordinates {tzname} and local datetime {dt_orig_res}. Judging by them, {tag} should be {offset_s}', fff
+        return None
+
+
+    # doesn't look like quicktime (which includes mp4) supports tz offsets :(
+    # perhaps the reason is that creation time supposed to be UTC, but most cameras store local time
+    # see "API QuickTimeUTC" in exiftool docs
+    supports_tz_offset = mime not in {'video/mp4', 'video/quicktime', 'video/x-msvideo'}
+
+    if supports_tz_offset:
+        tz_offset = yield from check_tz_offset()
+    else:
+        tz_offset = None
+
 
 
 def check_all_media(*, db_path: str, regex: str | None, apply_fixes: bool, dir_summary: bool, config: Config) -> None:
@@ -503,7 +517,7 @@ def check_all_media(*, db_path: str, regex: str | None, apply_fixes: bool, dir_s
             err: str
             fixer: Fix | None
             if isinstance(check_res, tuple):
-                (err, fixer) = check_res  # type: ignore[misc]
+                (err, fixer) = check_res
             else:
                 err = check_res
                 fixer = None

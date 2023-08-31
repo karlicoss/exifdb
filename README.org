@@ -51,6 +51,8 @@ Here's an incomplete list of issues I noticed on my media files that the tool de
 
 - media shared via social media has creation date tags zeroed out (i.e. =0000-00-00 00:00:00=) and has no coordinates
 
+- some media is randomly missing =GPSPosition=, e.g. if you were on the tube/plane, or just GPS didn't wake up in time
+
 - most cameras/phones don't set =OffsetTimeOriginal= (timezone information)
 
   in this case the tool tries to infer it from creation (local) time and GPS coordinates

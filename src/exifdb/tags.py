@@ -22,6 +22,8 @@ class Tags:
     GPSLatitudeRef         = 'GPSLatitudeRef'
     GPSLongitude           = 'GPSLongitude'
     GPSLongitudeRef        = 'GPSLongitudeRef'
+
+    OffsetTime             = 'OffsetTime'
     # fmt: on
 
 
@@ -98,7 +100,7 @@ DT_EXTRA = {
 
 # tz-like tags that might be potentially useful
 TZ_EXTRA = {
-    'OffsetTime',
+    Tags.OffsetTime,
     'OffsetTimeDigitized',
 
     # hm, this was only present on one photo (not even mine)
