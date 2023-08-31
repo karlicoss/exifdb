@@ -193,14 +193,16 @@ def check_media(row: Row) -> Iterator[
     # https://peps.python.org/pep-0380/
     coordinate: Final[Coordinate | None] = yield from check_coordinate()
 
+    # seems like quicktime doesn't support gps datetime
+    # https://exiftool.org/TagNames/QuickTime.html
+    supports_gps_datetime = mime not in {'video/mp4', 'video/quicktime', 'video/x-msvideo'}
+
     def check_gps_datetime() -> Generator[
             Error,
             None,
             datetime_aware | None,
     ]:
-        if mime in {'video/mp4', 'video/quicktime', 'video/x-msvideo'}:
-            # seems like quicktime doesn't support gps datetime
-            # https://exiftool.org/TagNames/QuickTime.html
+        if not supports_gps_datetime:
             return None
 
         gps_dt_s = row.get(Tags.GPSDateTime)
@@ -221,6 +223,10 @@ def check_media(row: Row) -> Iterator[
         return gps_dt
 
     gps_datetime: Final[datetime_aware | None] = yield from check_gps_datetime()
+
+    if supports_gps_datetime:
+        if (coordinate is None) ^ (gps_datetime is None):
+            yield f'Warning: only one of {Tags.GPSPosition}/{Tags.GPSDateTime} is set, a bit suspicious'
 
     def check_filename_datetime() -> Generator[
             Error,

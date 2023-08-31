@@ -18,6 +18,7 @@ class Tags:
     SubSecDateTimeOriginal = 'SubSecDateTimeOriginal'
     ContentCreateDate      = 'ContentCreateDate'
 
+    GPSPosition            = 'GPSPosition'
     GPSLatitude            = 'GPSLatitude'
     GPSLatitudeRef         = 'GPSLatitudeRef'
     GPSLongitude           = 'GPSLongitude'
