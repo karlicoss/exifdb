@@ -24,7 +24,8 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.8', '3.9', '3.10', '3.11']
+        # '3.8', '3.9',  might support later if someone requests
+        python-version: ['3.10', '3.11']
         # vvv just an example of excluding stuff from matrix
         # exclude: [{platform: macos-latest, python-version: '3.6'}]
 
@@ -68,7 +69,7 @@ jobs:
 
     - uses: actions/setup-python@v4
       with:
-        python-version: '3.8'
+        python-version: '3.10'
 
     - uses: actions/checkout@v3
       with:
